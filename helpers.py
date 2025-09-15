@@ -223,3 +223,41 @@ def classify_folder_dual(folder_glob_pattern_faulty, folder_glob_pattern_normal,
     res_faulty = classify_folder(folder_glob_pattern_faulty, classifier, **kwargs)
     res_normal = classify_folder(folder_glob_pattern_normal, classifier, **kwargs)
     return res_faulty, res_normal
+
+def view_misclassified_images_cnn(misclassified_paths, max_images=20, cols=5):
+    """Display ONLY misclassified images.
+    Parameters
+    ----------
+    misclassified_paths : list
+        List of file paths to misclassified images.
+    max_images : int
+        Maximum number of misclassified samples to visualize.
+    cols : int
+        Number of subplot columns.
+    Behavior
+    --------
+    Plots only the misclassified images. If there are none, prints a message.
+    """
+    if not misclassified_paths:
+        print("No misclassified images to display.")
+        return
+
+    misclassified_paths = misclassified_paths[:max_images]
+
+    rows = (len(misclassified_paths) + cols - 1) // cols
+    fig, axes = plt.subplots(rows, cols, figsize=(cols * 3.2, rows * 3.2))
+    if rows * cols == 1:
+        axes = np.array([axes])
+    axes = axes.ravel()
+
+    for i, ax in enumerate(axes):
+        if i < len(misclassified_paths):
+            img = cv.imread(misclassified_paths[i])
+            if img is not None:
+                ax.imshow(cv.cvtColor(img, cv.COLOR_BGR2RGB))
+            ax.set_title(f"Misclassified {i+1}")
+        else:
+            ax.axis('off')
+
+    plt.tight_layout()
+    plt.show()
