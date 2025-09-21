@@ -2,6 +2,7 @@ import cv2 as cv
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
+from typing import Tuple, List
 
 def ensure_bgr(img):
     """Ensure the input image is in BGR format.
@@ -82,6 +83,133 @@ def remove_small_components(mask, min_area):
         if area >= min_area:
             out[labels == i] = 255
     return out
+
+def hs_histogram(img_bgr, h_bins: int = 24, s_bins: int = 16, mask=None) -> np.ndarray:
+    """Compute a normalized 2D histogram over Hue and Saturation.
+    - img_bgr: input image in BGR
+    - h_bins, s_bins: number of bins for H and S
+    - mask: optional mask; robust to dtype/shape
+    Returns a 1D float32 vector of length h_bins*s_bins summing to 1.
+    """
+    hsv = cv.cvtColor(img_bgr, cv.COLOR_BGR2HSV)
+    H, S, _ = cv.split(hsv)
+    if mask is None:
+        mask_u8 = np.ones(H.shape, dtype=np.uint8) * 255
+    else:
+        m = mask
+        if m.ndim == 3:
+            m = cv.cvtColor(m, cv.COLOR_BGR2GRAY)
+        if m.shape != H.shape:
+            m = cv.resize(m, (H.shape[1], H.shape[0]), interpolation=cv.INTER_NEAREST)
+        if m.dtype != np.uint8:
+            m = m.astype(np.uint8)
+        vmax = int(m.max()) if m.size > 0 else 0
+        if vmax <= 1:
+            m = (m * 255).astype(np.uint8)
+        mask_u8 = m
+    hist = cv.calcHist([H, S], [0, 1], mask_u8, [h_bins, s_bins], [0, 180, 0, 256])
+    hist = hist.astype(np.float32)
+    s = float(hist.sum())
+    if s > 0:
+        hist /= s
+    return hist.flatten()
+
+def make_warm_mask(img_bgr: np.ndarray) -> np.ndarray:
+    """Warm = red OR yellow/orange in HSV."""
+    red = make_red_mask_hsv(img_bgr)
+    hsv = cv.cvtColor(img_bgr, cv.COLOR_BGR2HSV)
+    lower_y = np.array([15, 80, 60], dtype=np.uint8)
+    upper_y = np.array([35, 255, 255], dtype=np.uint8)
+    yellow = cv.inRange(hsv, lower_y, upper_y)
+    warm = cv.bitwise_or(red, yellow)
+    return warm
+
+def detect_fault_regions(img_bgr: np.ndarray, baseline_bgr: np.ndarray,
+                         min_area_frac: float = 0.0005) -> Tuple[np.ndarray, list]:
+    """Return warm mask and list of bounding boxes for warm regions above baseline.
+    min_area_frac: fraction of image area; regions below are ignored.
+    args:
+        img_bgr: Input BGR image (numpy array).
+        baseline_bgr: Baseline BGR image (numpy array).
+        min_area_frac: Minimum area fraction of image area to consider a region valid.
+    returns:
+        A tuple (new_warm, boxes) where new_warm is a binary mask of detected warm regions
+    """
+    H, W = img_bgr.shape[:2]
+    base = cv.resize(baseline_bgr, (W, H), interpolation=cv.INTER_AREA)
+    warm_img = make_warm_mask(img_bgr)
+    warm_base = make_warm_mask(base)
+    new_warm = cv.bitwise_and(warm_img, cv.bitwise_not(warm_base))
+    kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, (5, 5))
+    new_warm = cv.morphologyEx(new_warm, cv.MORPH_CLOSE, kernel, iterations=1)
+    new_warm = remove_small_components(new_warm, min_area=max(5, int(min_area_frac * H * W)))
+    contours, _ = cv.findContours(new_warm, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+    boxes = []
+    for cnt in contours:
+        x, y, w, h = cv.boundingRect(cnt)
+        boxes.append((x, y, w, h))
+
+    # Suppress boxes that are at least 80% contained within another box
+    def _ioa(inner, outer):
+        xi1 = max(inner[0], outer[0])
+        yi1 = max(inner[1], outer[1])
+        xi2 = min(inner[0] + inner[2], outer[0] + outer[2])
+        yi2 = min(inner[1] + inner[3], outer[1] + outer[3])
+        iw = max(0, xi2 - xi1)
+        ih = max(0, yi2 - yi1)
+        inter = iw * ih
+        inner_area = max(1, inner[2] * inner[3])
+        return inter / inner_area
+
+    keep = [True] * len(boxes)
+    for i in range(len(boxes)):
+        if not keep[i]:
+            continue
+        for j in range(len(boxes)):
+            if i == j:
+                continue
+            ioa = _ioa(boxes[i], boxes[j])
+            if ioa >= 0.8:
+                # i is 80% within j -> drop i (prefer keeping larger by checking area)
+                area_i = boxes[i][2] * boxes[i][3]
+                area_j = boxes[j][2] * boxes[j][3]
+                if area_i <= area_j:
+                    keep[i] = False
+                    break
+                else:
+                    keep[j] = False
+    boxes = [b for k, b in zip(keep, boxes) if k]
+    return new_warm, boxes
+
+def draw_boxes(img_bgr: np.ndarray, boxes: List[Tuple[int, int, int, int]]) -> np.ndarray:
+    """Draw red rectangles for provided boxes on a copy of the image."""
+    vis = img_bgr.copy()
+    for (x, y, w, h) in boxes:
+        cv.rectangle(vis, (x, y), (x + w, y + h), (0, 0, 255), 2)
+    return vis
+
+def compute_baseline_for_transformer(t_dir: Path) -> np.ndarray:
+    """Compute a baseline image for a transformer (per pixel median of normal images).
+    Returns BGR uint8 image or raises if none found.
+    args:
+        t_dir: Path to transformer directory containing 'normal' subdirectory.
+    returns:        Baseline BGR image as np.ndarray of dtype uint8.
+    raises:        FileNotFoundError: if no normal images found in t_dir/normal.
+    """
+    normals = sorted((t_dir / 'normal').glob('*.*'))
+    imgs = []
+    for p in normals:
+        img = cv.imread(str(p), cv.IMREAD_UNCHANGED)
+        if img is None:
+            continue
+        imgs.append(ensure_bgr(img))
+    if not imgs:
+        raise FileNotFoundError(f'No normal images found in {t_dir}/normal')
+    h_min = min(im.shape[0] for im in imgs)
+    w_min = min(im.shape[1] for im in imgs)
+    stack = [cv.resize(im, (w_min, h_min), interpolation=cv.INTER_AREA) for im in imgs]
+    median = np.median(np.stack(stack, axis=0), axis=0).astype(np.uint8)
+    return median
 
 def view_misclassified_images(results, expected_label=None, expected_labels=None,
                                 max_images=20, cols=5):
