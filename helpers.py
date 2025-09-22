@@ -389,3 +389,40 @@ def view_misclassified_images_cnn(misclassified_paths, max_images=20, cols=5):
 
     plt.tight_layout()
     plt.show()
+
+def filter_boxes_by_containment(boxes, overlap_thresh=0.8):
+    """
+    Remove boxes that are largely inside another box.
+    Boxes are tuples (x, y, w, h).
+    overlap_thresh = fraction of area that must be inside another box to remove.
+    """
+    if not boxes:
+        return boxes
+
+    keep = []
+    for i, box_a in enumerate(boxes):
+        xa, ya, wa, ha = box_a
+        area_a = wa * ha
+        xa2, ya2 = xa + wa, ya + ha
+        contained = False
+        for j, box_b in enumerate(boxes):
+            if i == j:
+                continue
+            xb, yb, wb, hb = box_b
+            xb2, yb2 = xb + wb, yb + hb
+
+            # intersection
+            inter_x1 = max(xa, xb)
+            inter_y1 = max(ya, yb)
+            inter_x2 = min(xa2, xb2)
+            inter_y2 = min(ya2, yb2)
+            inter_w = max(0, inter_x2 - inter_x1)
+            inter_h = max(0, inter_y2 - inter_y1)
+            inter_area = inter_w * inter_h
+
+            if inter_area / area_a >= overlap_thresh:
+                contained = True
+                break
+        if not contained:
+            keep.append(box_a)
+    return keep

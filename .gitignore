@@ -212,3 +212,6 @@ separated_data/
 
 # Models
 models/
+
+# PDF
+*.pdf
