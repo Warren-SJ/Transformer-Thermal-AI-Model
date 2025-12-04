@@ -1,2 +1,3 @@
 # Transformer-Thermal-AI-Model
-Implementation on the AI model of the anomaly detection
+
+A repository for approaches taken to detect anomalies in transformers using thermal images.
